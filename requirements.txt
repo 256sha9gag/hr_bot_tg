@@ -1,0 +1,4 @@
+aiogram==3.18.0
+python-dotenv==1.0.1
+aiosqlite==0.21.0
+redis==5.0.1
