@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  hr_bot:
+    build: .
+    container_name: hr_bot
+    restart: always
+    env_file:
+      - .env
+    depends_on:
+      - redis
+    volumes:
+      - sqlite_data:/app/bot_data.db
+    networks:
+      - bot_network
+
+  redis:
+    image: redis:7
+    container_name: hr_bot_redis
+    restart: always
+    networks:
+      - bot_network
+
+volumes:
+  sqlite_data:
+
+networks:
+  bot_network:
+    driver: bridge
