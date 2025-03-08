@@ -2,8 +2,6 @@
 venv/
 # Файлы конфигурации и токены
 .env
-# База данных
-bot_data.db
 # Кеши Python
 __pycache__/
 *.pyc
