@@ -1,7 +1,11 @@
-FROM python:3.11-slim
+FROM python:3.11
 
 RUN apt-get update && apt-get install -y \
     libsqlite3-dev \
+    iputils-ping \
+    netcat-openbsd \
+    sqlite3 \
+    redis-tools \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

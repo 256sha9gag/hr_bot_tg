@@ -12,18 +12,33 @@ from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
+# Загрузка переменных окружения
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
+DB_PATH = os.getenv("DB_PATH")
+REDIS_HOST = os.getenv("REDIS_HOST")
+REDIS_PORT = os.getenv("REDIS_PORT")
 
 if not TOKEN:
     raise ValueError("Ошибка: Переменная окружения BOT_TOKEN не задана!")
 if not CHANNEL_ID:
     raise ValueError("Ошибка: Переменная окружения CHANNEL_ID не задана!")
 
-# --- Инициализация глобальных переменных/объектов ---
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# --- Инициализация глобальных объектов ---
 router = Router()
-queue = asyncio.Queue()  # Очередь для отправки сообщений
+
+# Подключение к Redis
+async def get_redis_client() -> Redis:
+    return Redis(host=REDIS_HOST, port=REDIS_PORT, db=5)
+
+# Инициализация FSM-хранилища
+async def init_storage() -> RedisStorage:
+    redis_client = await get_redis_client()
+    return RedisStorage(redis_client)
 
 # Определяем состояния
 class Survey(StatesGroup):
@@ -31,29 +46,28 @@ class Survey(StatesGroup):
 
 questions = [
     "Представьтесь, пожалуйста (ФИО)",
-    "Ты тратишь время на фоллоупы или это формальность и лучше приступить к задаче быстрее?",
+    "Ты тратишь время на фоллоу-апы или это скорее формальность и лучше приступить к задаче быстрее?",
     "Тебя добавили во встречу, где нет повестки. Пойдешь?",
-    "Ты реализовал свою идею и получил результат. Узнал, что в соседней команде сделали аналог. Вам предстоит объединить решения. Как будешь действовать?",
-    "Назревает конфликт с коллегой, есть ощущение, что у вас разнонаправленные цели. Как будешь решать их? Стоит ли это решать? В каком случае эскалация была бы эффективнее?",
-    "На встрече договорились взять задачу, но она не приоритетна и неясно зачем делать. Как поступишь?",
-    "Коллеги сдали проект, но он не соответствует ожиданиям. Ты сообщил, что все плохо. Попросишь переделать? Эскалируешь? Что-то другое?",
+    "Ты реализовал свою идею и получил неплохой результат (построил процесс/ внедрил свой инструмент). А после узнал, что подобное решение уже сделано иначе в соседней команде. Но вам предстоит работать над общим решением - как будешь действовать?",
+    "Назревает конфликт с коллегой, есть ощущение, что у вас разнонаправленные цели. Как ты будешь решать их? Пригласишь на встречу в офисе или онлайн? Стоит ли это как-то решать в принципе? В каком случае эскалация была бы эффективнее?",
+    "На встрече договорились, что ты с командой возьмёте задачу на себя. Но вы не успеваете, есть более приоритетные задачи. Плюс, ты так до конца и не понял, зачем ее делать. Как поступишь?",
+    "Скоро перформанс ревью, а коллеги сдали проект, но он не соответствует твоим ожиданиям. Ты им сообщил, что всё плохо. Попросишь переделать? Эскалируешь? Что-то другое?",
 ]
 
-async def sender_worker(bot: Bot):
-    while True:
-        msg = await queue.get()
-        await bot.send_message(CHANNEL_ID, msg)
-        await asyncio.sleep(0.5)  # Антиспам-защита
+async def send_message_to_channel(bot: Bot, message: str):
+    try:
+        await bot.send_message(CHANNEL_ID, message)
+    except Exception as e:
+        logging.error(f"Ошибка при отправке в канал: {e}")
 
 @router.message(Command("start"))
 async def start_survey(message: types.Message, state: FSMContext):
-    await message.answer("Привет! Давай начнем опрос. Отвечай на вопросы честно.")
+    await state.clear()
+    await message.answer("Привет! Давай начнем опрос.")
     await state.update_data(answers={}, current_question=0)
     await state.set_state(Survey.collecting_answers)
     await message.answer(questions[0])
-
-    # Фоновая задача автоочистки (30 минут)
-    asyncio.create_task(auto_reset_state(state))
+    asyncio.create_task(auto_reset_state(message.from_user.id, state))
 
 @router.message()
 async def process_answer(message: types.Message, state: FSMContext):
@@ -64,80 +78,71 @@ async def process_answer(message: types.Message, state: FSMContext):
     await state.update_data(answers=answers)
 
     if current_question + 1 < len(questions):
-        # Задаём следующий вопрос
         await state.update_data(current_question=current_question + 1)
         await message.answer(questions[current_question + 1])
     else:
-        # Все вопросы заданы – сохраняем результат
         user_id = message.from_user.id
         username = message.from_user.username or "Неизвестно"
         full_name = message.from_user.full_name or "Неизвестно"
-
         answers_json = json.dumps(answers, ensure_ascii=False)
-        response_text = (
-            f"<b>Пользователь:</b> {full_name} (@{username})\n\n"
-            + "\n\n".join([f"<b>{q}</b>\nОтвет: {a}" for q, a in answers.items()])
-        )
+        response_text = f"<b>Пользователь:</b> {full_name} (@{username})\n\n" + "\n\n".join([f"<b>{q}</b>\nОтвет: {a}" for q, a in answers.items()])
 
-        # Сохранение в БД
-        async with aiosqlite.connect("bot_data.db") as db:
-            await db.execute(
-                "INSERT INTO responses (user_id, username, full_name, answers) "
-                "VALUES (?, ?, ?, ?)",
-                (user_id, username, full_name, answers_json),
-            )
-            await db.commit()
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("PRAGMA journal_mode=WAL;")
+                await db.execute(
+                    "INSERT INTO responses (user_id, username, full_name, answers) VALUES (?, ?, ?, ?)",
+                    (user_id, username, full_name, answers_json),
+                )
+                await db.commit()
+                logging.info(f"✅ Данные записаны в БД для user_id={user_id}")
+        except Exception as e:
+            logging.error(f"❌ Ошибка записи в БД: {e}")
 
-        # Отправка в канал через очередь
-        await queue.put(response_text)
+        await send_message_to_channel(message.bot, response_text)
+        await message.answer("Спасибо за участие в опросе! Чтобы пройти опрос снова, отправьте /start.")
 
-        await message.answer("Спасибо за участие в опросе!")
+        # Очистка состояния (бот "забывает" пользователя)
         await state.clear()
+        
+        # Удаление данных из Redis, чтобы бот больше не отвечал пользователю, пока он не введет /start
+        redis = await get_redis_client()
+        await redis.delete(f"fsm:{user_id}")
 
-async def auto_reset_state(state: FSMContext):
-    await asyncio.sleep(1800)  # 30 минут
-    # Если пользователь до сих пор «завис» в этом состоянии, чистим
+
+
+
+async def auto_reset_state(user_id: int, state: FSMContext):
+    await asyncio.sleep(1800)
     await state.clear()
+    redis = await get_redis_client()
+    await redis.delete(f"fsm:{user_id}")
 
 async def init_db():
-    # Создаём таблицу, если не существует
-    async with aiosqlite.connect("bot_data.db") as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS responses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                username TEXT,
-                full_name TEXT,
-                answers TEXT
-            )
-        """)
-        await db.commit()
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("PRAGMA journal_mode=WAL;")
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS responses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    username TEXT,
+                    full_name TEXT,
+                    answers TEXT
+                )
+            """)
+            await db.commit()
+            logging.info("✅ База данных инициализирована")
+    except Exception as e:
+        logging.error(f"❌ Ошибка инициализации БД: {e}")
 
-async def get_redis_client() -> Redis:
-    return Redis(host="localhost", port=6379, db=5)
-
-async def init_storage() -> RedisStorage:
-    redis_client = await get_redis_client()
-    return RedisStorage(redis_client)
 
 async def main():
-    logging.basicConfig(level=logging.INFO)
-
-    # Инициализация БД
     await init_db()
-
-    # Инициализация FSM-хранилища (Redis)
     storage = await init_storage()
-
-    # Создаём бота и диспетчер
     bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher(storage=storage)
     dp.include_router(router)
-
-    # Запускаем фоновую задачу для отправки сообщений
-    asyncio.create_task(sender_worker(bot))
-
-    # Стартуем поллинг
     await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":

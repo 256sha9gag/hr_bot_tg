@@ -8,9 +8,10 @@ services:
     env_file:
       - .env
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     volumes:
-      - sqlite_data:/app/bot_data.db
+    - ./bot_data.db:/bot_data.db
     networks:
       - bot_network
 
@@ -20,6 +21,11 @@ services:
     restart: always
     networks:
       - bot_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   sqlite_data:
