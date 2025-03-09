@@ -54,9 +54,21 @@ questions = [
     "Скоро перформанс ревью, а коллеги сдали проект, но он не соответствует твоим ожиданиям. Ты им сообщил, что всё плохо. Попросишь переделать? Эскалируешь? Что-то другое?",
 ]
 
-async def send_message_to_channel(bot: Bot, message: str):
+async def send_message_to_channel(bot: Bot, response_text: str):
     try:
-        await bot.send_message(CHANNEL_ID, message)
+        chunk_size = 4096
+        messages = response_text.split("\n\n")  # Разбиваем по логическим блокам
+
+        current_message = ""
+        for part in messages:
+            if len(current_message) + len(part) + 2 < chunk_size:
+                current_message += part + "\n\n"
+            else:
+                await bot.send_message(CHANNEL_ID, current_message)
+                current_message = part + "\n\n"
+        
+        if current_message:
+            await bot.send_message(CHANNEL_ID, current_message)
     except Exception as e:
         logging.error(f"Ошибка при отправке в канал: {e}")
 
@@ -101,16 +113,9 @@ async def process_answer(message: types.Message, state: FSMContext):
 
         await send_message_to_channel(message.bot, response_text)
         await message.answer("Спасибо за участие в опросе! Чтобы пройти опрос снова, отправьте /start.")
-
-        # Очистка состояния (бот "забывает" пользователя)
         await state.clear()
-        
-        # Удаление данных из Redis, чтобы бот больше не отвечал пользователю, пока он не введет /start
         redis = await get_redis_client()
         await redis.delete(f"fsm:{user_id}")
-
-
-
 
 async def auto_reset_state(user_id: int, state: FSMContext):
     await asyncio.sleep(1800)
@@ -119,23 +124,19 @@ async def auto_reset_state(user_id: int, state: FSMContext):
     await redis.delete(f"fsm:{user_id}")
 
 async def init_db():
-    try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("PRAGMA journal_mode=WAL;")
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS responses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    username TEXT,
-                    full_name TEXT,
-                    answers TEXT
-                )
-            """)
-            await db.commit()
-            logging.info("✅ База данных инициализирована")
-    except Exception as e:
-        logging.error(f"❌ Ошибка инициализации БД: {e}")
-
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA journal_mode=WAL;")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS responses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                username TEXT,
+                full_name TEXT,
+                answers TEXT
+            )
+        """)
+        await db.commit()
+        logging.info("✅ База данных инициализирована")
 
 async def main():
     await init_db()
